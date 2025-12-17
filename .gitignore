@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific data directories
+data/raw_pdfs/*
+!data/raw_pdfs/.gitkeep
+data/processed_chunks/*
+!data/processed_chunks/.gitkeep
+embeddings/*
+!embeddings/.gitkeep
+vectorstore/*
+!vectorstore/.gitkeep
+
+# Logs
+*.log
+logs/

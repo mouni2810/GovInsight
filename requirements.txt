@@ -1,0 +1,29 @@
+# Core RAG Framework
+llama-index==0.10.12
+llama-index-llms-gemini==0.1.7
+llama-index-embeddings-gemini==0.1.6
+
+# Vector Database
+chromadb==0.4.22
+
+# LLM API (DO NOT PIN TO 0.3.x)
+google-generativeai>=0.4.1,<0.5.0
+
+# PDF Processing
+PyMuPDF==1.23.26
+
+# API Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+
+# Environment Management
+python-dotenv==1.0.0
+
+# Utilities
+numpy==1.26.3
+pandas==2.1.4
+requests==2.31.0
+
+# Tokenization
+tiktoken>=0.5.0

@@ -1,0 +1,2 @@
+# This file ensures the data/raw_pdfs directory is tracked by git
+# Place your PDF files here before running the indexing pipeline

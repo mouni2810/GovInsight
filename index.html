@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="GovInsight - AI-powered query system for Indian Union Budget documents">
+  <title>GovInsight - Budget Query System</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+
+<body>
+  <!-- Main Container -->
+  <div class="container">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <div class="logo-icon">🇮🇳</div>
+        <h1 class="logo-text">GovInsight</h1>
+      </div>
+      <p class="subtitle">AI-Powered Analysis of Indian Union Budget Documents</p>
+      <div class="header-badge">
+        <span class="badge">🔍 RAG-Powered</span>
+        <span class="badge">📊 Budget 2024-25</span>
+        <span class="badge">⚡ Fast Retrieval</span>
+      </div>
+    </header>
+
+    <!-- Query Section -->
+    <section class="query-section">
+      <div class="card">
+        <h2 class="section-title">Ask a Question</h2>
+
+        <!-- Query Input -->
+        <div class="input-group">
+          <label for="queryInput" class="input-label">Your Query</label>
+          <textarea id="queryInput" class="textarea"
+            placeholder="E.g., What is the budget allocation for education in 2024-25?" rows="3"></textarea>
+        </div>
+
+        <!-- Quick Example Queries -->
+        <div class="quick-queries">
+          <span class="quick-queries-label">Try:</span>
+          <button class="quick-query-btn"
+            data-query="What is the total budget allocation for Bharatmala project?">Bharatmala Budget</button>
+          <button class="quick-query-btn"
+            data-query="What are the major schemes under Ministry of Road Transport and Highways?">Road Transport
+            Schemes</button>
+          <button class="quick-query-btn" data-query="What is the expenditure on women and child development?">Women &
+            Child Dev</button>
+        </div>
+
+        <!-- Submit Button -->
+        <button id="submitBtn" class="btn btn-full">
+          <span class="btn-text">🔍 Search Budget Documents</span>
+          <span class="btn-loading hidden">
+            <span class="spinner"></span>
+            Searching...
+          </span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Results Section -->
+    <section id="resultsSection" class="results-section hidden">
+
+      <!-- Loading State -->
+      <div id="loadingState" class="card loading hidden">
+        <div class="loading-spinner"></div>
+        <p class="loading-text">Searching budget documents...</p>
+        <p class="loading-subtext">Analyzing sources and generating response</p>
+      </div>
+
+      <!-- Error State -->
+      <div id="errorState" class="error-message hidden">
+        <div class="error-icon">⚠️</div>
+        <div class="error-title">Error occurred</div>
+        <p class="error-details"></p>
+      </div>
+
+      <!-- Empty State -->
+      <div id="emptyState" class="empty-state hidden">
+        <div class="empty-icon">📚</div>
+        <div class="empty-title">No results found</div>
+        <p>Try adjusting your query or filters</p>
+      </div>
+
+      <!-- Answer Card -->
+      <div id="answerCard" class="card answer-card hidden">
+        <div class="answer-header">
+          <div class="answer-icon">💡</div>
+          <h3 class="answer-title">Answer</h3>
+          <span id="responseTime" class="response-time"></span>
+        </div>
+        <div class="answer-content">
+          <!-- Dynamic content will be inserted here -->
+        </div>
+
+        <!-- Sources -->
+        <div id="sourcesContainer" class="sources">
+          <!-- Dynamic sources will be inserted here -->
+        </div>
+      </div>
+
+    </section>
+
+
+  </div>
+
+  <!-- JavaScript -->
+  <script src="/static/js/app.js"></script>
+</body>
+
+</html>

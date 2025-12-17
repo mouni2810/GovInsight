@@ -1,0 +1,2 @@
+# This file ensures the data/processed_chunks directory is tracked by git
+# Processed chunks are cached here during indexing
