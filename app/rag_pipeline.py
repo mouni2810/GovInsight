@@ -114,6 +114,19 @@ def preprocess_query(query: str, year_filter: Optional[str] = None) -> str:
     return processed
 
 
+# Pre-compile regex patterns for chunk compression (used in compress_chunk_for_query)
+_COMPRESSION_PATTERNS = [
+    re.compile(r'₹\s*[\d,\.]+'),                    # Rupee amounts
+    re.compile(r'Rs\.?\s*[\d,\.]+'),                # Rs. amounts
+    re.compile(r'\d+(?:,\d{3})*(?:\.\d+)?\s*(?:crore|lakh|cr|lac)', re.IGNORECASE), # Crore/lakh amounts
+    re.compile(r'\d{4}-\d{2,4}'),                   # Year ranges (2023-24, 2023-2024)
+    re.compile(r'\d+(?:\.\d+)?\s*%'),               # Percentages
+    re.compile(r'(?:allocation|budget|expenditure|outlay|grant|provision)', re.IGNORECASE), # Budget keywords
+    re.compile(r'(?:increase|decrease|growth|reduction|revised|actual)', re.IGNORECASE), # Trend keywords
+    re.compile(r'(?:total|aggregate|sum|overall)', re.IGNORECASE),  # Aggregate keywords
+]
+
+
 
 # System prompt template for Gemini - OPTIMIZED for dense, factual responses
 SYSTEM_PROMPT_TEMPLATE = """You are GovInsight, a specialized AI for Indian Union Budget analysis. Your role is to extract and present budget data accurately.
@@ -288,18 +301,6 @@ def compress_chunk_for_query(chunk_text: str, query: str) -> str:
     lines = chunk_text.split('\n')
     relevant_lines = []
     
-    # Patterns for budget-relevant content
-    patterns = [
-        r'₹\s*[\d,\.]+',                    # Rupee amounts
-        r'Rs\.?\s*[\d,\.]+',                # Rs. amounts
-        r'\d+(?:,\d{3})*(?:\.\d+)?\s*(?:crore|lakh|cr|lac)', # Crore/lakh amounts
-        r'\d{4}-\d{2,4}',                   # Year ranges (2023-24, 2023-2024)
-        r'\d+(?:\.\d+)?\s*%',               # Percentages
-        r'(?:allocation|budget|expenditure|outlay|grant|provision)', # Budget keywords
-        r'(?:increase|decrease|growth|reduction|revised|actual)', # Trend keywords
-        r'(?:total|aggregate|sum|overall)',  # Aggregate keywords
-    ]
-    
     # Query keywords to look for
     query_lower = query.lower()
     query_words = set(query_lower.split())
@@ -309,8 +310,8 @@ def compress_chunk_for_query(chunk_text: str, query: str) -> str:
         if not line_stripped:
             continue
         
-        # Check if line contains budget-relevant patterns
-        has_pattern = any(re.search(p, line_stripped, re.IGNORECASE) for p in patterns)
+        # Check if line contains budget-relevant patterns (using pre-compiled patterns)
+        has_pattern = any(pattern.search(line_stripped) for pattern in _COMPRESSION_PATTERNS)
         
         # Check if line contains query keywords
         line_lower = line_stripped.lower()
@@ -356,17 +357,23 @@ def compress_chunks_parallel(chunks: List[Dict], query: str) -> List[Dict]:
             'compressed_length': len(compressed_text)
         }
     
-    # Use ThreadPoolExecutor for parallel compression
-    compressed_chunks = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(compress_single, chunk): i for i, chunk in enumerate(chunks)}
-        results = [None] * len(chunks)
-        
-        for future in as_completed(futures):
-            idx = futures[future]
-            results[idx] = future.result()
-        
-        compressed_chunks = results
+    # Use sequential processing for very few chunks to avoid ThreadPoolExecutor overhead
+    if len(chunks) < 4:
+        compressed_chunks = [compress_single(chunk) for chunk in chunks]
+    else:
+        # Use ThreadPoolExecutor for parallel compression
+        # Use DEFAULT_MAX_WORKERS but don't exceed chunk count
+        max_workers = min(DEFAULT_MAX_WORKERS, len(chunks))
+        compressed_chunks = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(compress_single, chunk): i for i, chunk in enumerate(chunks)}
+            results = [None] * len(chunks)
+            
+            for future in as_completed(futures):
+                idx = futures[future]
+                results[idx] = future.result()
+            
+            compressed_chunks = results
     
     # Log compression stats
     total_original = sum(c.get('original_length', 0) for c in compressed_chunks)
@@ -378,6 +385,11 @@ def compress_chunks_parallel(chunks: List[Dict], query: str) -> List[Dict]:
     return compressed_chunks
 
 
+# Configuration constants
+DEFAULT_MAX_WORKERS = 4  # Maximum parallel workers for PDF processing
+DEFAULT_EMBEDDING_CACHE_DIR = "embeddings"  # Default cache directory
+
+
 class RAGPipeline:
     """
     Complete RAG pipeline for indexing budget documents.
@@ -387,7 +399,9 @@ class RAGPipeline:
         self,
         pdf_directory: str = "data/raw_pdfs",
         vectorstore_directory: str = "vectorstore",
-        embedding_model_type: str = "huggingface"
+        embedding_model_type: str = "huggingface",
+        max_workers: int = DEFAULT_MAX_WORKERS,
+        embedding_cache_dir: Optional[str] = DEFAULT_EMBEDDING_CACHE_DIR
     ):
         """
         Initialize RAG pipeline.
@@ -396,20 +410,143 @@ class RAGPipeline:
             pdf_directory: Directory containing PDF files
             vectorstore_directory: Directory for vector store persistence
             embedding_model_type: Type of embedding model ("huggingface")
+            max_workers: Maximum parallel workers for PDF processing (default: 4)
+            embedding_cache_dir: Directory for embedding cache, None to disable (default: "embeddings")
         """
         self.pdf_directory = pdf_directory
         self.vectorstore_directory = vectorstore_directory
         self.embedding_model_type = embedding_model_type
+        self.max_workers = max_workers
+        self.embedding_cache_dir = embedding_cache_dir
         
         # Initialize components
         self.pdf_processor = None
         self.vector_store = None
         self.embedding_generator = None
     
+    def _process_single_pdf(
+        self,
+        pdf_path: Path,
+        pdf_idx: int,
+        total_pdfs: int,
+        document_metadata: Optional[Dict[str, Dict]]
+    ) -> List[Dict]:
+        """
+        Process a single PDF file and return its chunks.
+        
+        Args:
+            pdf_path: Path to PDF file
+            pdf_idx: Index of this PDF (for progress tracking)
+            total_pdfs: Total number of PDFs being processed
+            document_metadata: Optional metadata dictionary
+            
+        Returns:
+            List of chunks with metadata
+        """
+        print(f"  Processing ({pdf_idx}/{total_pdfs}): {pdf_path.name}")
+        
+        # Extract text page by page
+        pages_data = self.pdf_processor.extract_text_from_pdf(pdf_path)
+        
+        # Get metadata for this PDF from configuration
+        if document_metadata and pdf_path.name in document_metadata:
+            metadata = validate_metadata(document_metadata[pdf_path.name])
+            print(f"    ✓ Using provided metadata")
+        else:
+            metadata = get_metadata_for_document(pdf_path.name)
+        
+        # Log the metadata being used
+        print(f"    → Year: {metadata.get('year', 'Unknown')}, "
+              f"Ministry: {metadata.get('ministry', 'Unknown')}, "
+              f"Scheme: {metadata.get('scheme', 'General')}")
+        
+        # Chunk the extracted text with complete metadata
+        chunks = chunk_text_with_metadata(
+            pages_data=pages_data,
+            metadata=metadata,
+            chunk_size=1000,
+            overlap=200
+        )
+        
+        print(f"    → {len(chunks)} chunks created")
+        return chunks
+    
+    def _process_pdfs_sequential(
+        self,
+        pdf_files: List[Path],
+        document_metadata: Optional[Dict[str, Dict]]
+    ) -> List[Dict]:
+        """
+        Process PDFs sequentially (original behavior).
+        
+        Args:
+            pdf_files: List of PDF file paths
+            document_metadata: Optional metadata dictionary
+            
+        Returns:
+            List of all chunks
+        """
+        all_chunks = []
+        
+        for idx, pdf_path in enumerate(pdf_files, 1):
+            chunks = self._process_single_pdf(pdf_path, idx, len(pdf_files), document_metadata)
+            all_chunks.extend(chunks)
+        
+        print(f"\nExtracted {len(all_chunks)} chunks from {len(pdf_files)} documents")
+        return all_chunks
+    
+    def _process_pdfs_parallel(
+        self,
+        pdf_files: List[Path],
+        document_metadata: Optional[Dict[str, Dict]]
+    ) -> List[Dict]:
+        """
+        Process PDFs in parallel for faster indexing.
+        
+        Args:
+            pdf_files: List of PDF file paths
+            document_metadata: Optional metadata dictionary
+            
+        Returns:
+            List of all chunks
+        """
+        all_chunks = []
+        
+        # Use ThreadPoolExecutor for I/O-bound PDF processing
+        # Use configured max_workers, but don't exceed number of PDFs
+        max_workers = min(self.max_workers, len(pdf_files))
+        print(f"  Using {max_workers} parallel workers...")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all PDF processing tasks
+            future_to_pdf = {
+                executor.submit(
+                    self._process_single_pdf,
+                    pdf_path,
+                    idx,
+                    len(pdf_files),
+                    document_metadata
+                ): pdf_path
+                for idx, pdf_path in enumerate(pdf_files, 1)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_pdf):
+                pdf_path = future_to_pdf[future]
+                try:
+                    chunks = future.result()
+                    all_chunks.extend(chunks)
+                except Exception as e:
+                    print(f"    ✗ Error processing {pdf_path.name}: {e}")
+        
+        print(f"\nExtracted {len(all_chunks)} chunks from {len(pdf_files)} documents")
+        return all_chunks
+    
     def index_documents(
         self,
         document_metadata: Optional[Dict[str, Dict]] = None,
-        reset_vectorstore: bool = False
+        reset_vectorstore: bool = False,
+        parallel_processing: bool = True
     ) -> None:
         """
         Index all PDF documents into the vector store.
@@ -423,6 +560,7 @@ class RAGPipeline:
             document_metadata: Optional dictionary mapping filenames to metadata dicts.
                                If not provided, uses metadata_config.py configuration.
             reset_vectorstore: If True, clear existing vector store before indexing
+            parallel_processing: If True, process PDFs in parallel (default: True)
         """
         print("=" * 60)
         print("Starting GovInsight Document Indexing")
@@ -436,41 +574,17 @@ class RAGPipeline:
         pdf_files = self.pdf_processor.load_pdfs()
         print(f"Found {len(pdf_files)} PDFs to index")
         
-        # Step 2: Extract text from all PDFs
+        # Step 2: Extract text from all PDFs (with optional parallel processing)
         print(f"\n[2/5] Extracting text from {len(pdf_files)} PDFs...")
-        all_chunks = []
         
-        for idx, pdf_path in enumerate(pdf_files, 1):
-            print(f"  Processing ({idx}/{len(pdf_files)}): {pdf_path.name}")
-            
-            # Extract text page by page
-            pages_data = self.pdf_processor.extract_text_from_pdf(pdf_path)
-            
-            # Get metadata for this PDF from configuration
-            # Priority: document_metadata param > metadata_config.py > defaults
-            if document_metadata and pdf_path.name in document_metadata:
-                metadata = validate_metadata(document_metadata[pdf_path.name])
-                print(f"    ✓ Using provided metadata")
-            else:
-                metadata = get_metadata_for_document(pdf_path.name)
-            
-            # Log the metadata being used
-            print(f"    → Year: {metadata.get('year', 'Unknown')}, "
-                  f"Ministry: {metadata.get('ministry', 'Unknown')}, "
-                  f"Scheme: {metadata.get('scheme', 'General')}")
-            
-            # Chunk the extracted text with complete metadata
-            chunks = chunk_text_with_metadata(
-                pages_data=pages_data,
-                metadata=metadata,
-                chunk_size=1000,
-                overlap=200
-            )
-            
-            all_chunks.extend(chunks)
-            print(f"    → {len(chunks)} chunks created")
-        
-        print(f"\nExtracted {len(all_chunks)} chunks from {len(pdf_files)} documents")
+        # Use sequential processing for single PDF or if parallel is disabled
+        if len(pdf_files) == 1 or not parallel_processing:
+            if len(pdf_files) == 1:
+                print("  Single PDF detected, using sequential processing...")
+            all_chunks = self._process_pdfs_sequential(pdf_files, document_metadata)
+        else:
+            print("  Using parallel processing for faster extraction...")
+            all_chunks = self._process_pdfs_parallel(pdf_files, document_metadata)
         
         if not all_chunks:
             print("No chunks extracted. Exiting.")
@@ -482,7 +596,15 @@ class RAGPipeline:
             model_type=self.embedding_model_type
         )
         
-        embeddings = embed_chunks(all_chunks, self.embedding_generator)
+        # Use embedding cache to speed up re-indexing (if enabled)
+        cache_path = None
+        if self.embedding_cache_dir:
+            cache_path = f"{self.embedding_cache_dir}/cache_{self.embedding_model_type}.pkl"
+            print(f"  Embedding cache: {cache_path}")
+        else:
+            print("  Embedding cache disabled")
+        
+        embeddings = embed_chunks(all_chunks, self.embedding_generator, cache_path=cache_path)
         print("Generated embeddings")
         
         # Step 4: Initialize vector store
@@ -868,7 +990,10 @@ def index_pdfs_cli(
     pdf_directory: str = "data/raw_pdfs",
     vectorstore_directory: str = "vectorstore",
     embedding_model: str = "huggingface",
-    reset: bool = False
+    reset: bool = False,
+    parallel: bool = True,
+    max_workers: int = DEFAULT_MAX_WORKERS,
+    use_cache: bool = True
 ) -> None:
     """
     CLI interface for indexing PDFs.
@@ -878,14 +1003,19 @@ def index_pdfs_cli(
         vectorstore_directory: Directory for vector store persistence
         embedding_model: Type of embedding model to use
         reset: Whether to reset the vector store before indexing
+        parallel: Whether to use parallel processing for PDFs (default: True)
+        max_workers: Maximum parallel workers (default: 4)
+        use_cache: Whether to use embedding cache (default: True)
     """
     pipeline = RAGPipeline(
         pdf_directory=pdf_directory,
         vectorstore_directory=vectorstore_directory,
-        embedding_model_type=embedding_model
+        embedding_model_type=embedding_model,
+        max_workers=max_workers,
+        embedding_cache_dir=DEFAULT_EMBEDDING_CACHE_DIR if use_cache else None
     )
     
-    pipeline.index_documents(reset_vectorstore=reset)
+    pipeline.index_documents(reset_vectorstore=reset, parallel_processing=parallel)
 
 
 def query_rag(
@@ -1040,6 +1170,25 @@ def main():
         help="Reset vector store before indexing (WARNING: deletes existing data)"
     )
     
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Disable parallel PDF processing (useful for debugging)"
+    )
+    
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=DEFAULT_MAX_WORKERS,
+        help=f"Maximum parallel workers for PDF processing (default: {DEFAULT_MAX_WORKERS})"
+    )
+    
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable embedding cache (forces regeneration)"
+    )
+    
     args = parser.parse_args()
     
     if args.index:
@@ -1047,7 +1196,10 @@ def main():
             pdf_directory=args.pdf_dir,
             vectorstore_directory=args.vectorstore_dir,
             embedding_model=args.embedding_model,
-            reset=args.reset
+            reset=args.reset,
+            parallel=not args.no_parallel,
+            max_workers=args.max_workers,
+            use_cache=not args.no_cache
         )
     else:
         parser.print_help()
@@ -1055,6 +1207,9 @@ def main():
         print("  python app/rag_pipeline.py --index")
         print("  python app/rag_pipeline.py --index --reset")
         print("  python app/rag_pipeline.py --index --embedding-model huggingface")
+        print("  python app/rag_pipeline.py --index --no-parallel  # Disable parallel processing")
+        print("  python app/rag_pipeline.py --index --max-workers 8  # Use 8 parallel workers")
+        print("  python app/rag_pipeline.py --index --no-cache  # Disable embedding cache")
 
 
 if __name__ == "__main__":
