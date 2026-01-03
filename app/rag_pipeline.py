@@ -358,8 +358,10 @@ def compress_chunks_parallel(chunks: List[Dict], query: str) -> List[Dict]:
         }
     
     # Use ThreadPoolExecutor for parallel compression
+    # Use DEFAULT_MAX_WORKERS but don't exceed chunk count
+    max_workers = min(DEFAULT_MAX_WORKERS, len(chunks))
     compressed_chunks = []
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(compress_single, chunk): i for i, chunk in enumerate(chunks)}
         results = [None] * len(chunks)
         
@@ -570,11 +572,15 @@ class RAGPipeline:
         
         # Step 2: Extract text from all PDFs (with optional parallel processing)
         print(f"\n[2/5] Extracting text from {len(pdf_files)} PDFs...")
-        if parallel_processing and len(pdf_files) > 1:
+        
+        # Use sequential processing for single PDF or if parallel is disabled
+        if len(pdf_files) == 1 or not parallel_processing:
+            if len(pdf_files) == 1:
+                print("  Single PDF detected, using sequential processing...")
+            all_chunks = self._process_pdfs_sequential(pdf_files, document_metadata)
+        else:
             print("  Using parallel processing for faster extraction...")
             all_chunks = self._process_pdfs_parallel(pdf_files, document_metadata)
-        else:
-            all_chunks = self._process_pdfs_sequential(pdf_files, document_metadata)
         
         if not all_chunks:
             print("No chunks extracted. Exiting.")

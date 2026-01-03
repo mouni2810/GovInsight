@@ -7,6 +7,7 @@ embeddings, and other utilities.
 
 import os
 import pickle
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Optional, Union
 import chromadb
@@ -439,7 +440,7 @@ def embed_chunks(
     Generate embeddings for a list of text chunks with batch processing.
     
     Optionally cache embeddings to disk for faster re-indexing.
-    Cache validation uses a hash of chunk texts to detect changes.
+    Cache validation uses a SHA-256 hash of chunk texts to detect changes.
     
     Args:
         chunks: List of chunk dictionaries containing 'text' field
@@ -449,11 +450,9 @@ def embed_chunks(
     Returns:
         List of embedding vectors
     """
-    import hashlib
-    
-    # Compute hash of chunk texts for cache validation
+    # Compute hash of chunk texts for cache validation (using SHA-256)
     texts = [chunk['text'] for chunk in chunks]
-    content_hash = hashlib.md5(''.join(texts).encode('utf-8')).hexdigest()
+    content_hash = hashlib.sha256(''.join(texts).encode('utf-8')).hexdigest()
     
     # Try to load from cache if specified
     if cache_path:
