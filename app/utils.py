@@ -226,6 +226,9 @@ def format_metadata_for_storage(chunk: Dict) -> Dict:
     This prevents KeyError exceptions during queries by ensuring
     fields like 'year', 'ministry', 'scheme' are always present.
     
+    Note: Content metrics (token_count, number_density, etc.) should already
+    be computed during chunking for efficiency.
+    
     Args:
         chunk: Chunk dictionary with text and metadata
         
@@ -235,22 +238,22 @@ def format_metadata_for_storage(chunk: Dict) -> Dict:
     # Define required fields with their default values
     # This ensures every chunk has complete metadata schema
     metadata = {
-        "year": str(chunk.get("year", "Unknown") or "Unknown"),
-        "ministry": str(chunk.get("ministry", "Unknown") or "Unknown"),
-        "scheme": str(chunk.get("scheme", "General") or "General"),
-        "budget_category": str(chunk.get("budget_category", "General") or "General"),
-        "state": str(chunk.get("state", "Central") or "Central"),
-        "document_type": str(chunk.get("document_type", "Budget Document") or "Budget Document"),
-        "page_number": int(chunk.get("page_number", 0) or 0),
+        "year": str(chunk.get("year") or "Unknown"),
+        "ministry": str(chunk.get("ministry") or "Unknown"),
+        "scheme": str(chunk.get("scheme") or "General"),
+        "budget_category": str(chunk.get("budget_category") or "General"),
+        "state": str(chunk.get("state") or "Central"),
+        "document_type": str(chunk.get("document_type") or "Budget Document"),
+        "page_number": int(chunk.get("page_number") or 0),
         # Context fields for retrieval
         "document_name": str(chunk.get("document_name", "")),
         "chunk_index": int(chunk.get("chunk_index", -1)),
         "id": str(chunk.get("id", "")),
-        # Content density fields for reranking
-        "token_count": int(chunk.get("token_count", 0) or 0),
-        "char_length": int(chunk.get("char_length", 0) or 0),
+        # Content density fields for reranking (pre-computed during chunking)
+        "token_count": int(chunk.get("token_count") or 0),
+        "char_length": int(chunk.get("char_length") or 0),
         "has_numbers": bool(chunk.get("has_numbers", False)),
-        "number_density": float(chunk.get("number_density", 0.0) or 0.0)
+        "number_density": float(chunk.get("number_density") or 0.0)
     }
     
     # Ensure no empty strings (replace with defaults)
@@ -426,17 +429,44 @@ def initialize_embeddings(
             raise
 
 
-def embed_chunks(chunks: List[Dict], embedding_generator: EmbeddingGenerator) -> List[List[float]]:
+def embed_chunks(
+    chunks: List[Dict],
+    embedding_generator: EmbeddingGenerator,
+    cache_path: Optional[str] = None
+) -> List[List[float]]:
     """
     Generate embeddings for a list of text chunks with batch processing.
+    
+    Optionally cache embeddings to disk for faster re-indexing.
     
     Args:
         chunks: List of chunk dictionaries containing 'text' field
         embedding_generator: Initialized EmbeddingGenerator instance
+        cache_path: Optional path to cache embeddings (e.g., "embeddings/cache.pkl")
         
     Returns:
         List of embedding vectors
     """
+    import pickle
+    from pathlib import Path
+    
+    # Try to load from cache if specified
+    if cache_path:
+        cache_file = Path(cache_path)
+        if cache_file.exists():
+            try:
+                print(f"Loading embeddings from cache: {cache_path}")
+                with open(cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                    # Verify cache matches current chunks
+                    if len(cached_data) == len(chunks):
+                        print(f"✓ Loaded {len(cached_data)} embeddings from cache")
+                        return cached_data
+                    else:
+                        print(f"Cache size mismatch ({len(cached_data)} vs {len(chunks)}), regenerating...")
+            except Exception as e:
+                print(f"Failed to load cache: {e}, regenerating...")
+    
     texts = [chunk['text'] for chunk in chunks]
     
     print(f"Generating embeddings for {len(texts)} chunks...")
@@ -458,6 +488,17 @@ def embed_chunks(chunks: List[Dict], embedding_generator: EmbeddingGenerator) ->
         all_embeddings.extend(batch_embeddings)
     
     print(f"Generated {len(all_embeddings)} embeddings")
+    
+    # Save to cache if specified
+    if cache_path:
+        try:
+            cache_file = Path(cache_path)
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(all_embeddings, f)
+            print(f"✓ Saved embeddings to cache: {cache_path}")
+        except Exception as e:
+            print(f"Warning: Failed to save cache: {e}")
     
     return all_embeddings
 

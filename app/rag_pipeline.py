@@ -406,10 +406,127 @@ class RAGPipeline:
         self.vector_store = None
         self.embedding_generator = None
     
+    def _process_single_pdf(
+        self,
+        pdf_path: Path,
+        pdf_idx: int,
+        total_pdfs: int,
+        document_metadata: Optional[Dict[str, Dict]]
+    ) -> List[Dict]:
+        """
+        Process a single PDF file and return its chunks.
+        
+        Args:
+            pdf_path: Path to PDF file
+            pdf_idx: Index of this PDF (for progress tracking)
+            total_pdfs: Total number of PDFs being processed
+            document_metadata: Optional metadata dictionary
+            
+        Returns:
+            List of chunks with metadata
+        """
+        print(f"  Processing ({pdf_idx}/{total_pdfs}): {pdf_path.name}")
+        
+        # Extract text page by page
+        pages_data = self.pdf_processor.extract_text_from_pdf(pdf_path)
+        
+        # Get metadata for this PDF from configuration
+        if document_metadata and pdf_path.name in document_metadata:
+            metadata = validate_metadata(document_metadata[pdf_path.name])
+            print(f"    ✓ Using provided metadata")
+        else:
+            metadata = get_metadata_for_document(pdf_path.name)
+        
+        # Log the metadata being used
+        print(f"    → Year: {metadata.get('year', 'Unknown')}, "
+              f"Ministry: {metadata.get('ministry', 'Unknown')}, "
+              f"Scheme: {metadata.get('scheme', 'General')}")
+        
+        # Chunk the extracted text with complete metadata
+        chunks = chunk_text_with_metadata(
+            pages_data=pages_data,
+            metadata=metadata,
+            chunk_size=1000,
+            overlap=200
+        )
+        
+        print(f"    → {len(chunks)} chunks created")
+        return chunks
+    
+    def _process_pdfs_sequential(
+        self,
+        pdf_files: List[Path],
+        document_metadata: Optional[Dict[str, Dict]]
+    ) -> List[Dict]:
+        """
+        Process PDFs sequentially (original behavior).
+        
+        Args:
+            pdf_files: List of PDF file paths
+            document_metadata: Optional metadata dictionary
+            
+        Returns:
+            List of all chunks
+        """
+        all_chunks = []
+        
+        for idx, pdf_path in enumerate(pdf_files, 1):
+            chunks = self._process_single_pdf(pdf_path, idx, len(pdf_files), document_metadata)
+            all_chunks.extend(chunks)
+        
+        print(f"\nExtracted {len(all_chunks)} chunks from {len(pdf_files)} documents")
+        return all_chunks
+    
+    def _process_pdfs_parallel(
+        self,
+        pdf_files: List[Path],
+        document_metadata: Optional[Dict[str, Dict]]
+    ) -> List[Dict]:
+        """
+        Process PDFs in parallel for faster indexing.
+        
+        Args:
+            pdf_files: List of PDF file paths
+            document_metadata: Optional metadata dictionary
+            
+        Returns:
+            List of all chunks
+        """
+        all_chunks = []
+        
+        # Use ThreadPoolExecutor for I/O-bound PDF processing
+        max_workers = min(4, len(pdf_files))  # Limit to 4 workers
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all PDF processing tasks
+            future_to_pdf = {
+                executor.submit(
+                    self._process_single_pdf,
+                    pdf_path,
+                    idx,
+                    len(pdf_files),
+                    document_metadata
+                ): pdf_path
+                for idx, pdf_path in enumerate(pdf_files, 1)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_pdf):
+                pdf_path = future_to_pdf[future]
+                try:
+                    chunks = future.result()
+                    all_chunks.extend(chunks)
+                except Exception as e:
+                    print(f"    ✗ Error processing {pdf_path.name}: {e}")
+        
+        print(f"\nExtracted {len(all_chunks)} chunks from {len(pdf_files)} documents")
+        return all_chunks
+    
     def index_documents(
         self,
         document_metadata: Optional[Dict[str, Dict]] = None,
-        reset_vectorstore: bool = False
+        reset_vectorstore: bool = False,
+        parallel_processing: bool = True
     ) -> None:
         """
         Index all PDF documents into the vector store.
@@ -423,6 +540,7 @@ class RAGPipeline:
             document_metadata: Optional dictionary mapping filenames to metadata dicts.
                                If not provided, uses metadata_config.py configuration.
             reset_vectorstore: If True, clear existing vector store before indexing
+            parallel_processing: If True, process PDFs in parallel (default: True)
         """
         print("=" * 60)
         print("Starting GovInsight Document Indexing")
@@ -436,41 +554,13 @@ class RAGPipeline:
         pdf_files = self.pdf_processor.load_pdfs()
         print(f"Found {len(pdf_files)} PDFs to index")
         
-        # Step 2: Extract text from all PDFs
+        # Step 2: Extract text from all PDFs (with optional parallel processing)
         print(f"\n[2/5] Extracting text from {len(pdf_files)} PDFs...")
-        all_chunks = []
-        
-        for idx, pdf_path in enumerate(pdf_files, 1):
-            print(f"  Processing ({idx}/{len(pdf_files)}): {pdf_path.name}")
-            
-            # Extract text page by page
-            pages_data = self.pdf_processor.extract_text_from_pdf(pdf_path)
-            
-            # Get metadata for this PDF from configuration
-            # Priority: document_metadata param > metadata_config.py > defaults
-            if document_metadata and pdf_path.name in document_metadata:
-                metadata = validate_metadata(document_metadata[pdf_path.name])
-                print(f"    ✓ Using provided metadata")
-            else:
-                metadata = get_metadata_for_document(pdf_path.name)
-            
-            # Log the metadata being used
-            print(f"    → Year: {metadata.get('year', 'Unknown')}, "
-                  f"Ministry: {metadata.get('ministry', 'Unknown')}, "
-                  f"Scheme: {metadata.get('scheme', 'General')}")
-            
-            # Chunk the extracted text with complete metadata
-            chunks = chunk_text_with_metadata(
-                pages_data=pages_data,
-                metadata=metadata,
-                chunk_size=1000,
-                overlap=200
-            )
-            
-            all_chunks.extend(chunks)
-            print(f"    → {len(chunks)} chunks created")
-        
-        print(f"\nExtracted {len(all_chunks)} chunks from {len(pdf_files)} documents")
+        if parallel_processing and len(pdf_files) > 1:
+            print("  Using parallel processing for faster extraction...")
+            all_chunks = self._process_pdfs_parallel(pdf_files, document_metadata)
+        else:
+            all_chunks = self._process_pdfs_sequential(pdf_files, document_metadata)
         
         if not all_chunks:
             print("No chunks extracted. Exiting.")
@@ -482,7 +572,9 @@ class RAGPipeline:
             model_type=self.embedding_model_type
         )
         
-        embeddings = embed_chunks(all_chunks, self.embedding_generator)
+        # Use embedding cache to speed up re-indexing
+        cache_path = f"embeddings/cache_{self.embedding_model_type}.pkl"
+        embeddings = embed_chunks(all_chunks, self.embedding_generator, cache_path=cache_path)
         print("Generated embeddings")
         
         # Step 4: Initialize vector store

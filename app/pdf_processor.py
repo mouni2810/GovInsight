@@ -17,6 +17,20 @@ import fitz  # PyMuPDF
 import tiktoken
 
 
+# Pre-compile regex patterns for better performance
+_COMPILED_PATTERNS = {
+    'whitespace': re.compile(r'\s+'),
+    'page_number': re.compile(r'\bPage\s+\d+\b', re.IGNORECASE),
+    'page_of': re.compile(r'\bpage\s+\d+\s+of\s+\d+\b', re.IGNORECASE),
+    'url_https': re.compile(r'https?://\S+'),
+    'url_www': re.compile(r'www\.\S+'),
+    'pipes': re.compile(r'\|{3,}'),
+    'dashes': re.compile(r'-{5,}'),
+    'underscores': re.compile(r'_{5,}'),
+    'numbers': re.compile(r'\d+(?:,\d{3})*(?:\.\d+)?'),
+}
+
+
 class TokenChunker:
     """
     Token-based text chunker using tiktoken.
@@ -184,28 +198,28 @@ class PDFProcessor:
         Returns:
             Cleaned text with numbers preserved
         """
-        # Remove excessive whitespace FIRST
-        text = re.sub(r'\s+', ' ', text)
+        # Remove excessive whitespace FIRST (using pre-compiled pattern)
+        text = _COMPILED_PATTERNS['whitespace'].sub(' ', text)
         
         # Remove common header/footer patterns
         text = self._remove_headers_footers(text)
         
         # ONLY remove "Page X" style page numbers (very selective)
         # DO NOT remove standalone numbers - they could be budget figures!
-        text = re.sub(r'\bPage\s+\d+\b', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\bpage\s+\d+\s+of\s+\d+\b', '', text, flags=re.IGNORECASE)
+        text = _COMPILED_PATTERNS['page_number'].sub('', text)
+        text = _COMPILED_PATTERNS['page_of'].sub('', text)
         
         # Remove URLs (safe to remove)
-        text = re.sub(r'https?://\S+', '', text)
-        text = re.sub(r'www\.\S+', '', text)
+        text = _COMPILED_PATTERNS['url_https'].sub('', text)
+        text = _COMPILED_PATTERNS['url_www'].sub('', text)
         
         # Remove ONLY decorative elements (3+ repetitions for tables/borders)
-        text = re.sub(r'\|{3,}', '', text)  # 3+ pipes (table borders)
-        text = re.sub(r'-{5,}', '', text)   # 5+ dashes (horizontal lines)
-        text = re.sub(r'_{5,}', '', text)   # 5+ underscores (underlines)
+        text = _COMPILED_PATTERNS['pipes'].sub('', text)  # 3+ pipes (table borders)
+        text = _COMPILED_PATTERNS['dashes'].sub('', text)   # 5+ dashes (horizontal lines)
+        text = _COMPILED_PATTERNS['underscores'].sub('', text)   # 5+ underscores (underlines)
         
-        # Final whitespace normalization
-        text = re.sub(r'\s+', ' ', text).strip()
+        # Final whitespace normalization (using pre-compiled pattern)
+        text = _COMPILED_PATTERNS['whitespace'].sub(' ', text).strip()
         
         return text
     
@@ -319,6 +333,17 @@ def chunk_text_with_metadata(
             # Create a deterministic ID for this chunk
             chunk_id = f"{document_name}_chunk_{doc_chunk_index}"
             
+            # Pre-compute content density metrics for reranking
+            token_count = chunker.count_tokens(chunk_text)
+            char_length = len(chunk_text)
+            
+            # Count numbers in text for budget document relevance (using pre-compiled pattern)
+            numbers = _COMPILED_PATTERNS['numbers'].findall(chunk_text)
+            has_numbers = len(numbers) > 0
+            # Number density as percentage of characters that are numeric
+            number_chars = sum(len(n.replace(',', '')) for n in numbers)
+            number_density = (number_chars / char_length * 100) if char_length > 0 else 0.0
+            
             chunk = {
                 'id': chunk_id,
                 'text': chunk_text,
@@ -330,7 +355,12 @@ def chunk_text_with_metadata(
                 'document_type': metadata.get('document_type', 'Budget Document'),
                 'page_number': page_number,
                 'document_name': document_name,
-                'chunk_index': doc_chunk_index
+                'chunk_index': doc_chunk_index,
+                # Pre-computed metrics for reranking
+                'token_count': token_count,
+                'char_length': char_length,
+                'has_numbers': has_numbers,
+                'number_density': number_density
             }
             chunks.append(chunk)
             doc_chunk_index += 1
