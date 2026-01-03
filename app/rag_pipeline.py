@@ -114,6 +114,19 @@ def preprocess_query(query: str, year_filter: Optional[str] = None) -> str:
     return processed
 
 
+# Pre-compile regex patterns for chunk compression (used in compress_chunk_for_query)
+_COMPRESSION_PATTERNS = [
+    re.compile(r'₹\s*[\d,\.]+'),                    # Rupee amounts
+    re.compile(r'Rs\.?\s*[\d,\.]+'),                # Rs. amounts
+    re.compile(r'\d+(?:,\d{3})*(?:\.\d+)?\s*(?:crore|lakh|cr|lac)', re.IGNORECASE), # Crore/lakh amounts
+    re.compile(r'\d{4}-\d{2,4}'),                   # Year ranges (2023-24, 2023-2024)
+    re.compile(r'\d+(?:\.\d+)?\s*%'),               # Percentages
+    re.compile(r'(?:allocation|budget|expenditure|outlay|grant|provision)', re.IGNORECASE), # Budget keywords
+    re.compile(r'(?:increase|decrease|growth|reduction|revised|actual)', re.IGNORECASE), # Trend keywords
+    re.compile(r'(?:total|aggregate|sum|overall)', re.IGNORECASE),  # Aggregate keywords
+]
+
+
 
 # System prompt template for Gemini - OPTIMIZED for dense, factual responses
 SYSTEM_PROMPT_TEMPLATE = """You are GovInsight, a specialized AI for Indian Union Budget analysis. Your role is to extract and present budget data accurately.
@@ -288,18 +301,6 @@ def compress_chunk_for_query(chunk_text: str, query: str) -> str:
     lines = chunk_text.split('\n')
     relevant_lines = []
     
-    # Patterns for budget-relevant content
-    patterns = [
-        r'₹\s*[\d,\.]+',                    # Rupee amounts
-        r'Rs\.?\s*[\d,\.]+',                # Rs. amounts
-        r'\d+(?:,\d{3})*(?:\.\d+)?\s*(?:crore|lakh|cr|lac)', # Crore/lakh amounts
-        r'\d{4}-\d{2,4}',                   # Year ranges (2023-24, 2023-2024)
-        r'\d+(?:\.\d+)?\s*%',               # Percentages
-        r'(?:allocation|budget|expenditure|outlay|grant|provision)', # Budget keywords
-        r'(?:increase|decrease|growth|reduction|revised|actual)', # Trend keywords
-        r'(?:total|aggregate|sum|overall)',  # Aggregate keywords
-    ]
-    
     # Query keywords to look for
     query_lower = query.lower()
     query_words = set(query_lower.split())
@@ -309,8 +310,8 @@ def compress_chunk_for_query(chunk_text: str, query: str) -> str:
         if not line_stripped:
             continue
         
-        # Check if line contains budget-relevant patterns
-        has_pattern = any(re.search(p, line_stripped, re.IGNORECASE) for p in patterns)
+        # Check if line contains budget-relevant patterns (using pre-compiled patterns)
+        has_pattern = any(pattern.search(line_stripped) for pattern in _COMPRESSION_PATTERNS)
         
         # Check if line contains query keywords
         line_lower = line_stripped.lower()
@@ -960,7 +961,8 @@ def index_pdfs_cli(
     pdf_directory: str = "data/raw_pdfs",
     vectorstore_directory: str = "vectorstore",
     embedding_model: str = "huggingface",
-    reset: bool = False
+    reset: bool = False,
+    parallel: bool = True
 ) -> None:
     """
     CLI interface for indexing PDFs.
@@ -970,6 +972,7 @@ def index_pdfs_cli(
         vectorstore_directory: Directory for vector store persistence
         embedding_model: Type of embedding model to use
         reset: Whether to reset the vector store before indexing
+        parallel: Whether to use parallel processing for PDFs (default: True)
     """
     pipeline = RAGPipeline(
         pdf_directory=pdf_directory,
@@ -977,7 +980,7 @@ def index_pdfs_cli(
         embedding_model_type=embedding_model
     )
     
-    pipeline.index_documents(reset_vectorstore=reset)
+    pipeline.index_documents(reset_vectorstore=reset, parallel_processing=parallel)
 
 
 def query_rag(
@@ -1132,6 +1135,12 @@ def main():
         help="Reset vector store before indexing (WARNING: deletes existing data)"
     )
     
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Disable parallel PDF processing (useful for debugging)"
+    )
+    
     args = parser.parse_args()
     
     if args.index:
@@ -1139,7 +1148,8 @@ def main():
             pdf_directory=args.pdf_dir,
             vectorstore_directory=args.vectorstore_dir,
             embedding_model=args.embedding_model,
-            reset=args.reset
+            reset=args.reset,
+            parallel=not args.no_parallel
         )
     else:
         parser.print_help()
@@ -1147,6 +1157,7 @@ def main():
         print("  python app/rag_pipeline.py --index")
         print("  python app/rag_pipeline.py --index --reset")
         print("  python app/rag_pipeline.py --index --embedding-model huggingface")
+        print("  python app/rag_pipeline.py --index --no-parallel  # Disable parallel processing")
 
 
 if __name__ == "__main__":
