@@ -6,6 +6,7 @@ embeddings, and other utilities.
 """
 
 import os
+import pickle
 from pathlib import Path
 from typing import List, Dict, Optional, Union
 import chromadb
@@ -438,6 +439,7 @@ def embed_chunks(
     Generate embeddings for a list of text chunks with batch processing.
     
     Optionally cache embeddings to disk for faster re-indexing.
+    Cache validation uses a hash of chunk texts to detect changes.
     
     Args:
         chunks: List of chunk dictionaries containing 'text' field
@@ -447,8 +449,11 @@ def embed_chunks(
     Returns:
         List of embedding vectors
     """
-    import pickle
-    from pathlib import Path
+    import hashlib
+    
+    # Compute hash of chunk texts for cache validation
+    texts = [chunk['text'] for chunk in chunks]
+    content_hash = hashlib.md5(''.join(texts).encode('utf-8')).hexdigest()
     
     # Try to load from cache if specified
     if cache_path:
@@ -458,16 +463,20 @@ def embed_chunks(
                 print(f"Loading embeddings from cache: {cache_path}")
                 with open(cache_file, 'rb') as f:
                     cached_data = pickle.load(f)
-                    # Verify cache matches current chunks
-                    if len(cached_data) == len(chunks):
-                        print(f"✓ Loaded {len(cached_data)} embeddings from cache")
-                        return cached_data
+                    cached_embeddings = cached_data.get('embeddings', [])
+                    cached_hash = cached_data.get('hash', '')
+                    
+                    # Validate cache: check both size and content hash
+                    if len(cached_embeddings) == len(chunks) and cached_hash == content_hash:
+                        print(f"✓ Loaded {len(cached_embeddings)} embeddings from cache (hash verified)")
+                        return cached_embeddings
                     else:
-                        print(f"Cache size mismatch ({len(cached_data)} vs {len(chunks)}), regenerating...")
+                        if cached_hash != content_hash:
+                            print(f"Cache content changed (hash mismatch), regenerating...")
+                        else:
+                            print(f"Cache size mismatch ({len(cached_embeddings)} vs {len(chunks)}), regenerating...")
             except Exception as e:
                 print(f"Failed to load cache: {e}, regenerating...")
-    
-    texts = [chunk['text'] for chunk in chunks]
     
     print(f"Generating embeddings for {len(texts)} chunks...")
     
@@ -489,13 +498,17 @@ def embed_chunks(
     
     print(f"Generated {len(all_embeddings)} embeddings")
     
-    # Save to cache if specified
+    # Save to cache if specified (with content hash for validation)
     if cache_path:
         try:
             cache_file = Path(cache_path)
             cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_data = {
+                'embeddings': all_embeddings,
+                'hash': content_hash
+            }
             with open(cache_file, 'wb') as f:
-                pickle.dump(all_embeddings, f)
+                pickle.dump(cache_data, f)
             print(f"✓ Saved embeddings to cache: {cache_path}")
         except Exception as e:
             print(f"Warning: Failed to save cache: {e}")
