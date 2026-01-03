@@ -357,19 +357,23 @@ def compress_chunks_parallel(chunks: List[Dict], query: str) -> List[Dict]:
             'compressed_length': len(compressed_text)
         }
     
-    # Use ThreadPoolExecutor for parallel compression
-    # Use DEFAULT_MAX_WORKERS but don't exceed chunk count
-    max_workers = min(DEFAULT_MAX_WORKERS, len(chunks))
-    compressed_chunks = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(compress_single, chunk): i for i, chunk in enumerate(chunks)}
-        results = [None] * len(chunks)
-        
-        for future in as_completed(futures):
-            idx = futures[future]
-            results[idx] = future.result()
-        
-        compressed_chunks = results
+    # Use sequential processing for very few chunks to avoid ThreadPoolExecutor overhead
+    if len(chunks) < 4:
+        compressed_chunks = [compress_single(chunk) for chunk in chunks]
+    else:
+        # Use ThreadPoolExecutor for parallel compression
+        # Use DEFAULT_MAX_WORKERS but don't exceed chunk count
+        max_workers = min(DEFAULT_MAX_WORKERS, len(chunks))
+        compressed_chunks = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(compress_single, chunk): i for i, chunk in enumerate(chunks)}
+            results = [None] * len(chunks)
+            
+            for future in as_completed(futures):
+                idx = futures[future]
+                results[idx] = future.result()
+            
+            compressed_chunks = results
     
     # Log compression stats
     total_original = sum(c.get('original_length', 0) for c in compressed_chunks)

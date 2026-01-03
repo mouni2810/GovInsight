@@ -240,22 +240,22 @@ def format_metadata_for_storage(chunk: Dict) -> Dict:
     # Define required fields with their default values
     # This ensures every chunk has complete metadata schema
     metadata = {
-        "year": str(chunk.get("year") or "Unknown"),
-        "ministry": str(chunk.get("ministry") or "Unknown"),
-        "scheme": str(chunk.get("scheme") or "General"),
-        "budget_category": str(chunk.get("budget_category") or "General"),
-        "state": str(chunk.get("state") or "Central"),
-        "document_type": str(chunk.get("document_type") or "Budget Document"),
-        "page_number": int(chunk.get("page_number") or 0),
+        "year": str(chunk.get("year", "Unknown") or "Unknown"),
+        "ministry": str(chunk.get("ministry", "Unknown") or "Unknown"),
+        "scheme": str(chunk.get("scheme", "General") or "General"),
+        "budget_category": str(chunk.get("budget_category", "General") or "General"),
+        "state": str(chunk.get("state", "Central") or "Central"),
+        "document_type": str(chunk.get("document_type", "Budget Document") or "Budget Document"),
+        "page_number": int(chunk.get("page_number", 0) or 0),
         # Context fields for retrieval
         "document_name": str(chunk.get("document_name", "")),
         "chunk_index": int(chunk.get("chunk_index", -1)),
         "id": str(chunk.get("id", "")),
         # Content density fields for reranking (pre-computed during chunking)
-        "token_count": int(chunk.get("token_count") or 0),
-        "char_length": int(chunk.get("char_length") or 0),
+        "token_count": int(chunk.get("token_count", 0) or 0),
+        "char_length": int(chunk.get("char_length", 0) or 0),
         "has_numbers": bool(chunk.get("has_numbers", False)),
-        "number_density": float(chunk.get("number_density") or 0.0)
+        "number_density": float(chunk.get("number_density", 0.0) or 0.0)
     }
     
     # Ensure no empty strings (replace with defaults)
@@ -451,8 +451,12 @@ def embed_chunks(
         List of embedding vectors
     """
     # Compute hash of chunk texts for cache validation (using SHA-256)
+    # Use incremental hashing to avoid memory issues with large datasets
     texts = [chunk['text'] for chunk in chunks]
-    content_hash = hashlib.sha256(''.join(texts).encode('utf-8')).hexdigest()
+    hash_obj = hashlib.sha256()
+    for text in texts:
+        hash_obj.update(text.encode('utf-8'))
+    content_hash = hash_obj.hexdigest()
     
     # Try to load from cache if specified
     if cache_path:
